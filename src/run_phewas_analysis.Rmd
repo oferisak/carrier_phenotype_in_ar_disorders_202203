@@ -1,0 +1,109 @@
+---
+title: "Run PheWAS analysis"
+author: "Ofer Isakov"
+date: "11/01/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+vcf_analysis_folder<-'/media/SSD/Bioinformatics/Projects/carrier_phenotype_in_ar_disorders_202203/'
+project_dir<-vcf_analysis_folder
+knitr::opts_knit$set(root.dir=project_dir)
+knitr::opts_chunk$set(echo = F)
+library(ProjectTemplate)
+setwd(project_dir)
+load.project()
+
+```
+
+```{r example}
+#Generate some example data
+ex=generateExample(hit="335")
+#Extract the two parts from the returned list
+id.icd9.count=ex$id.vocab.code.count
+genotypes=ex$genotypes
+#Create the PheWAS code table- translates the icd9s, adds exclusions, and reshapes to a wide format
+phenotypes=createPhenotypes(id.icd9.count,id.sex = ex$id.sex)
+#Run the PheWAS
+results=phewas(phenotypes,genotypes,cores=4)
+PheWAS::phewasManhattan(results)
+```
+
+```{r read_data}
+full_genotype_data<-read_delim('./data/phewas_data/frx_premutation_phewas_covariate_data_ds.bde16568cc614eaf9bf9d332ed7385cd/frx_premutation_phewas_genotype_data.csv')
+full_icd_data<-read_delim('./data/phewas_data/frx_premutation_phewas_covariate_data_ds.bde16568cc614eaf9bf9d332ed7385cd/frx_premutation_phewas_icd_data.csv.gz')
+full_covariate_data<-read_delim('./data/phewas_data/frx_premutation_phewas_covariate_data_ds.bde16568cc614eaf9bf9d332ed7385cd/frx_premutation_phewas_covariate_data.csv')
+# fix icd_data
+full_icd_data_fixed<-icd_data%>%
+  mutate(vocabulary_id='ICD9CM')%>%
+  select(id=sample_id,
+         vocabulary_id,
+         code=icd9,
+         count=value)
+
+full_genotype_data<-full_genotype_data%>%select(id=sample_id,genotype)
+
+# fix covariate data
+full_covariate_data<-full_covariate_data%>%
+  mutate(sex=ifelse(gender,'M','F'))%>%
+  rename(id='sample_id',
+         age='dmg_age_in_years')
+```
+
+```{r filter_data}
+# filter to specific conditions 
+
+
+```
+
+```{r test}
+phenotypes=createPhenotypes(icd_data_fixed,
+                            min.code.count = 1,
+                            full.population.ids = genotype_data$id,
+                            id.sex = covariate_data%>%select(id,sex))
+
+
+results_dat=phewas(phenotypes ,
+               genotype_data,
+               covariates = covariate_data%>%select(id,age,ashkenaz),
+               cores=4,
+               min.records = 10,
+               significance.threshold = 'fdr')
+
+#Add PheWAS descriptions
+PheWAS::phewasManhattan(results_dat)
+results_dat=addPhecodeInfo(results_dat)
+```
+
+
+```{r non_phewas}
+
+common_diag<-icd_data%>%count(full_name)%>%arrange(desc(n))
+raw_diags<-icd_data%>%filter(full_name %in% (common_diag%>%filter(n>10)%>%pull(full_name)))
+raw_diags<-raw_diags%>%
+  mutate(value=ifelse(value>1,TRUE,FALSE))%>%
+  pivot_wider(id_cols = sample_id,names_from = full_name,values_from = value)%>%
+  rename(id=sample_id)
+
+raw_diags[is.na(raw_diags)]<-FALSE
+colnames(raw_diags)<-make.names(colnames(raw_diags))
+
+results_dat=phewas(raw_diags,
+               genotype_data,
+               covariates = covariate_data%>%select(id,age,ashkenaz),
+               cores=4,
+               min.records = 10,
+               significance.threshold = 'fdr')
+
+results_dat%>%
+  filter(p<0.01)%>%
+  ggplot(aes(x=forcats::fct_relevel(factor(phenotype),results_dat%>%arrange(p)%>%pull(phenotype)),
+             y=-log(p),
+             col=log(OR)))+
+  geom_point(size=2)+
+  scale_color_gradient2(low='darkcyan',high='darkred',mid='gray',midpoint = 0)+
+  theme(axis.text.x = element_text(angle=90))+coord_flip()+theme_minimal()
+
+
+```
+
