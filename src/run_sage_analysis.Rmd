@@ -1,0 +1,65 @@
+---
+title: "run_saige_analysis"
+author: "Ofer Isakov"
+date: '2023-02-19'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+vcf_analysis_folder<-'/media/SSD/Bioinformatics/Projects/carrier_phenotype_in_ar_disorders_202203/'
+project_dir<-vcf_analysis_folder
+knitr::opts_knit$set(root.dir=project_dir)
+knitr::opts_chunk$set(echo = F)
+library(ProjectTemplate)
+setwd(project_dir)
+load.project()
+
+```
+
+```{r read_data}
+full_genotype_data<-read_delim('./data/phewas_data/frx_premutation_phewas_covariate_data_ds.bde16568cc614eaf9bf9d332ed7385cd/frx_premutation_phewas_genotype_data.csv')
+full_icd_data<-read_delim('./data/phewas_data/frx_premutation_phewas_covariate_data_ds.bde16568cc614eaf9bf9d332ed7385cd/frx_premutation_phewas_icd_data.csv.gz')
+full_covariate_data<-read_delim('./data/phewas_data/frx_premutation_phewas_covariate_data_ds.bde16568cc614eaf9bf9d332ed7385cd/frx_premutation_phewas_covariate_data.csv')
+# fix icd_data
+full_icd_data_fixed<-full_icd_data%>%
+  mutate(vocabulary_id='ICD9CM')%>%
+  select(id=sample_id,
+         vocabulary_id,
+         code=icd9,
+         count=value,
+         full_name)
+
+full_genotype_data<-full_genotype_data%>%select(id=sample_id,genotype)
+
+# fix covariate data
+full_covariate_data<-full_covariate_data%>%
+  mutate(sex=ifelse(gender,'M','F'))%>%
+  rename(id='sample_id',
+         age='dmg_age_in_years')
+```
+
+```{r saige}
+phenotype_data<-genotype_data%>%select(id,genotype)%>%
+  left_join(
+    full_icd_data_fixed%>%filter(full_name=='diagnoses_2563_PREMATURE MENOPAUSE_count')%>%
+      group_by(id)%>%
+      summarize(phenotype=ifelse(sum(count)>0,2,1))
+  )%>%
+  mutate(alleles=ifelse(genotype==1,'C N','N N'))
+phenotype_data[is.na(phenotype_data)]<-1
+ped_file<-prep_ped_file_for_plink(phenotype_data)
+write.table(ped_file,file='./data/saige_data/test.ped',sep='\t',row.names = F,col.names = F,quote = F)
+
+pheno_file<-phenotype_data%>%select(id,phenotype)%>%mutate(phenotype=phenotype-1)
+write.table(pheno_file,file='./data/saige_data/test.pheno',sep='\t',row.names = F,col.names = T,quote = F)
+
+step1<-fitNULLGLMM(plinkFile = './data/saige_data/test',
+                   phenoFile = './data/saige_data/test.pheno',
+                   phenoCol='phenotype',
+                   sampleIDColinphenoFile = 'id',
+                   traitType = 'binary',
+                   outputPrefix = './output/saige_test',
+                   minMAFforGRM=0,
+                   LOCO=F,
+                   IsOverwriteVarianceRatioFile=T)
+```

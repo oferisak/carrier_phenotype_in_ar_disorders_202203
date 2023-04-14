@@ -34,12 +34,16 @@ full_genotype_data<-read_delim('./data/phewas_data/frx_premutation_phewas_covari
 full_icd_data<-read_delim('./data/phewas_data/frx_premutation_phewas_covariate_data_ds.bde16568cc614eaf9bf9d332ed7385cd/frx_premutation_phewas_icd_data.csv.gz')
 full_covariate_data<-read_delim('./data/phewas_data/frx_premutation_phewas_covariate_data_ds.bde16568cc614eaf9bf9d332ed7385cd/frx_premutation_phewas_covariate_data.csv')
 # fix icd_data
-full_icd_data_fixed<-icd_data%>%
+full_icd_data_fixed<-full_icd_data%>%
   mutate(vocabulary_id='ICD9CM')%>%
   select(id=sample_id,
          vocabulary_id,
          code=icd9,
-         count=value)
+         count=value,
+         full_name)
+
+# create icd9 to phecode map
+icd9_to_phecodes<-mapICD9ToPhecodes(full_icd_data_fixed%>%select(icd9=code),keep.icd9 = T,add.info = T)
 
 full_genotype_data<-full_genotype_data%>%select(id=sample_id,genotype)
 
@@ -51,59 +55,114 @@ full_covariate_data<-full_covariate_data%>%
 ```
 
 ```{r filter_data}
-# filter to specific conditions 
 
+get_logical_vector <- function(df, condition) {
+  if (length(condition)==0){ # if there are no conditions, just return a vector of TRUE 
+    logical_vector<-rep(TRUE,nrow(df))
+    return(logical_vector)
+  }
+  condition_to_parse<-paste0(paste("df$",condition,sep = ''),collapse='&')
+  print(condition_to_parse)
+  logical_vector <- eval(parse(text = condition_to_parse))
+  return(logical_vector)
+}
+#conditions<-c()
+conditions<-c('age>=30','age<=100')
+matching_samples<-full_covariate_data$id[get_logical_vector(full_covariate_data,conditions)]
+
+# filter to specific conditions 
+icd_data<-full_icd_data_fixed%>%filter(id%in%matching_samples)
+
+genotype_data<-full_genotype_data%>%filter(id%in%matching_samples)
+genotype_data%>%count(genotype)
+
+covariate_data<-full_covariate_data%>%filter(id%in%matching_samples)
 
 ```
 
 ```{r test}
-phenotypes=createPhenotypes(icd_data_fixed,
+# Specifying a min.code.count=NA will permit continuous code count phenotypes
+phenotypes=createPhenotypes(icd_data%>%select(-full_name),
                             min.code.count = 1,
+                            add.phecode.exclusions=T, # if F will not exclude uncertain records
                             full.population.ids = genotype_data$id,
                             id.sex = covariate_data%>%select(id,sex))
 
+all_phenos<-setdiff(colnames(phenotypes),'id')
+case_control_counts<-phenotypes%>%
+  pivot_longer(-id)%>%
+  left_join(genotype_data)%>%
+  group_by(name)%>%
+  summarize(non_na_cases=sum(ifelse(!is.na(value) & genotype==1,1,0),na.rm = T),
+            cases_with_pheno=sum(ifelse(value & genotype==1,1,0),na.rm = T),
+            non_na_controls=sum(ifelse(!is.na(value) & genotype==0,1,0),na.rm = T),
+            controls_with_pheno=sum(ifelse(value & genotype==0,1,0),na.rm = T))%>%
+  rename(phenotype='name')
+
+head(case_control_counts)
 
 results_dat=phewas(phenotypes ,
                genotype_data,
-               covariates = covariate_data%>%select(id,age,ashkenaz),
-               cores=4,
+               covariates = covariate_data%>%select(id,age,ashkenaz), 
+               cores=6,
                min.records = 10,
+               unadjusted=F, # unadjusted=T fails for some reason - couldnt find why
                significance.threshold = 'fdr')
+
 
 #Add PheWAS descriptions
 PheWAS::phewasManhattan(results_dat)
 results_dat=addPhecodeInfo(results_dat)
+results_dat<-results_dat%>%left_join(case_control_counts)
+plot_phewas_or(results_dat,pval_thresh = 0.05,phen_col_name = 'description')
+z<-results_dat%>%filter(grepl('ovar',description,ignore.case = T))
+
+# Explore specific groups
+phecode_search<-'256' # Ovarian dysfunction
+# now count all the patients with and without the phecode
+phecode_icds<-icd9_to_phecodes%>%filter(phecode==phecode_search)%>%pull(icd9)%>%unique()
+
+edata<-genotype_data%>%
+  left_join(
+    icd_data%>%
+      filter(code %in% phecode_icds)%>%
+      group_by(id)%>%
+      summarize(phecode_count=sum(count)))
+edata[is.na(edata)]<-0
+edata%>%count(genotype,phecode_count>1)
+
+chisq.test(phenotypes%>%select(id,is_phecode=phecode_search)%>%
+             left_join(genotype_data)%>%
+             count(genotype,is_phecode)%>%filter(!is.na(is_phecode)))
 ```
 
 
 ```{r non_phewas}
+ovary_diag<-icd_data%>%filter(grepl('ovar|menop',full_name,ignore.case = T))
 
 common_diag<-icd_data%>%count(full_name)%>%arrange(desc(n))
-raw_diags<-icd_data%>%filter(full_name %in% (common_diag%>%filter(n>10)%>%pull(full_name)))
+common_diags<-icd_data%>%filter(full_name %in% (common_diag%>%filter(n>10)%>%pull(full_name)))
+
+raw_diags<-common_diags
+
 raw_diags<-raw_diags%>%
-  mutate(value=ifelse(value>1,TRUE,FALSE))%>%
-  pivot_wider(id_cols = sample_id,names_from = full_name,values_from = value)%>%
-  rename(id=sample_id)
+  mutate(value=ifelse(count>0,TRUE,FALSE))%>%
+  pivot_wider(id_cols = id,names_from = full_name,values_from = value)
 
 raw_diags[is.na(raw_diags)]<-FALSE
 colnames(raw_diags)<-make.names(colnames(raw_diags))
 
-results_dat=phewas(raw_diags,
-               genotype_data,
+results_dat=phewas(outcomes=raw_diags,
+               predictors=genotype_data,
                covariates = covariate_data%>%select(id,age,ashkenaz),
-               cores=4,
+               cores=6,
                min.records = 10,
                significance.threshold = 'fdr')
 
-results_dat%>%
-  filter(p<0.01)%>%
-  ggplot(aes(x=forcats::fct_relevel(factor(phenotype),results_dat%>%arrange(p)%>%pull(phenotype)),
-             y=-log(p),
-             col=log(OR)))+
-  geom_point(size=2)+
-  scale_color_gradient2(low='darkcyan',high='darkred',mid='gray',midpoint = 0)+
-  theme(axis.text.x = element_text(angle=90))+coord_flip()+theme_minimal()
+case_control_counts<-get_case_control_counts(raw_diags,genotype_data)
+results_dat<-results_dat%>%left_join(case_control_counts%>%rename(outcome=phenotype))
 
+plot_phewas_or(results_dat,pval_thresh = 0.005)
 
 ```
 
